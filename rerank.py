@@ -119,10 +119,11 @@ def mxbai_v2_rerank(query, documents, model_name, top_n=None):
         results_raw = reranker.rank(query=query, documents=documents)
         results = []
         for i, result in enumerate(results_raw):
+            # Fix: RankResult objects have direct attributes, not dict methods
             results.append(
                 {
-                    "index": result.get("index", i),
-                    "relevance_score": result.get("score", 0.0),
+                    "index": getattr(result, "index", i),
+                    "relevance_score": getattr(result, "score", 0.0),
                 }
             )
         results.sort(key=lambda x: x["relevance_score"], reverse=True)
