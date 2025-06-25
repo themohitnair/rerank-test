@@ -15,7 +15,6 @@ from FlagEmbedding import FlagReranker
 load_dotenv()
 
 client = AsyncQdrantClient(host="localhost", port=6333)
-JINA_API_KEY = os.getenv("JINA_API_KEY")
 
 MODELS = {
     "e5_large": {
@@ -38,17 +37,18 @@ RERANKERS = {
         "type": "sentence_transformer",
         "color": "orange",
     },
-    "jina_v2_multilingual": {
-        "name": "jina-reranker-v2-base-multilingual",
-        "type": "jina_api",
-        "color": "purple",
-    },
     "bge_large": {
         "name": "BAAI/bge-reranker-large",
         "type": "flag_embedding",
         "color": "darkgreen",
     },
+    "bge_v2_m3": {
+        "name": "BAAI/bge-reranker-v2-m3",
+        "type": "sentence_transformer",
+        "color": "blue",
+    },
 }
+
 
 SPECIFIC_TOPICS = [
     "England Cricket Team",
@@ -66,14 +66,6 @@ async def get_topic_counts(collection_name):
         topic = point.payload.get("topic", "Unknown")
         topic_counts[topic] = topic_counts.get(topic, 0) + 1
     return topic_counts
-
-def jina_rerank(query, documents, model="jina-reranker-v2-base-multilingual", top_n=None):
-    url = "https://api.jina.ai/v1/rerank"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {JINA_API_KEY}"}
-    data = {"model": model, "query": query, "documents": documents, "top_n": top_n}
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
-    return response.json()
 
 def flag_rerank(query, documents, model_name, top_n=None):
     try:
@@ -118,8 +110,6 @@ def rerank_documents(query, documents, reranker_info, top_n=None):
     model_name = reranker_info["name"]
     start_time = time.time()
     try:
-        if reranker_type == "jina_api":
-            result = jina_rerank(query, documents, model_name, top_n)
         elif reranker_type == "flag_embedding":
             result = flag_rerank(query, documents, model_name, top_n)
         elif reranker_type == "sentence_transformer":
