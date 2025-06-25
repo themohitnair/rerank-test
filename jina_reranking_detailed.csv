@@ -1,0 +1,6 @@
+Topic,Model,Original_Retrieved,After_Reranking,True_Positives,False_Positives,Precision,Recall
+England Cricket Team,JINA_V3,100,80,38,42,0.475,0.38
+England Football Team,JINA_V3,100,80,45,35,0.5625,0.45
+Black Coffee,JINA_V3,100,80,80,0,1.0,0.8
+Indian Cricket Team,JINA_V3,100,80,60,20,0.75,0.6
+Black History Month,JINA_V3,100,80,75,5,0.9375,0.75

@@ -1,0 +1,2 @@
+Model,Model_Name,Dimensions,Avg_Precision,Avg_Recall,Original_Retrieved,After_Reranking,Rerank_Reduction,Total_TP,Overall_Precision
+JINA_V3,jina-embeddings-v3,1024,0.745,0.596,500,400,20.0%,298,0.745
