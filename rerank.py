@@ -35,8 +35,13 @@ MODELS = {
 }
 
 RERANKERS = {
-    "mxbai_large": {
-        "name": "mixedbread-ai/mxbai-rerank-large-v1",
+    "mxbai_large2": {
+        "name": "mixedbread-ai/mxbai-rerank-large-v2",
+        "type": "sentence_transformer",
+        "color": "orange",
+    },
+    "mxbai_base2": {
+        "name": "mixedbread-ai/mxbai-rerank-base-v2",
         "type": "sentence_transformer",
         "color": "orange",
     },
