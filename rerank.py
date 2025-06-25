@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 from collections import Counter
 import pandas as pd
 import numpy as np
-import requests
 import os
 import time
 from dotenv import load_dotenv
@@ -48,16 +47,6 @@ RERANKERS = {
         "type": "sentence_transformer",
         "color": "blue",
     },
-    "jina_v2_multilingual": {
-        "name": "jina-reranker-v2-base-multilingual",
-        "type": "jina_api",
-        "color": "purple",
-    },
-    "bge_large": {
-        "name": "BAAI/bge-reranker-large",
-        "type": "flag_embedding",
-        "color": "darkgreen",
-    },
 }
 
 SPECIFIC_TOPICS = [
@@ -82,37 +71,6 @@ async def get_topic_counts(collection_name):
     for topic, count in topic_counts.items():
         print(f"  {topic}: {count} documents")
     return topic_counts
-
-
-def get_jina_embedding(text, model_name):
-    url = "https://api.jina.ai/v1/embeddings"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {JINA_API_KEY}",
-    }
-    data = {
-        "model": model_name,
-        "normalized": True,
-        "embedding_type": "float",
-        "input": [text],
-    }
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
-    return response.json()["data"][0]["embedding"]
-
-
-def jina_rerank(
-    query, documents, model="jina-reranker-v2-base-multilingual", top_n=None
-):
-    url = "https://api.jina.ai/v1/rerank"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {JINA_API_KEY}",
-    }
-    data = {"model": model, "query": query, "documents": documents, "top_n": top_n}
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
-    return response.json()
 
 
 def flag_rerank(query, documents, model_name, top_n=None):
@@ -190,8 +148,6 @@ def rerank_documents(query, documents, reranker_info, top_n=None):
             result = sentence_transformer_rerank(query, documents, model_name, top_n)
         elif reranker_type == "mxbai_v2":
             result = mxbai_v2_rerank(query, documents, model_name, top_n)
-        elif reranker_type == "jina_api":
-            result = jina_rerank(query, documents, model_name, top_n)
         else:
             raise ValueError(f"Unknown reranker type: {reranker_type}")
     except Exception as e:
@@ -227,8 +183,6 @@ async def evaluate_rerankers(
 
         if model_info["type"] == "local":
             query_vector = local_models[model_key].encode(topic).tolist()
-        elif model_info["type"] == "jina_api":
-            query_vector = get_jina_embedding(topic, model_info["name"])
         else:
             raise ValueError(f"Unknown model type: {model_info['type']}")
 
