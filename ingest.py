@@ -10,14 +10,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 client = AsyncQdrantClient(host="localhost", port=6333)
-JINA_API_KEY = os.getenv("JINA_API_KEY")
 
 MODELS = {
-    "jina_v3": {
-        "name": "jina-embeddings-v3",
+    "e5_large": {
+        "name": "intfloat/e5-large-v2",
         "dim": 1024,
-        "color": "mediumpurple",
-        "type": "jina_api",
+        "color": "lightgreen",
+        "type": "local",
+    },
+    "e5_base": {
+        "name": "intfloat/e5-base-v2",
+        "dim": 768,
+        "color": "lightyellow",
+        "type": "local",
     },
 }
 
