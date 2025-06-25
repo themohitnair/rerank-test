@@ -1,13 +1,10 @@
 import asyncio
 import orjson
 import uuid
-import os
+from sentence_transformers import SentenceTransformer
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
 
 client = AsyncQdrantClient(host="localhost", port=6333)
 
@@ -25,19 +22,6 @@ MODELS = {
         "type": "local",
     },
 }
-
-def get_jina_embedding(text, model_name):
-    url = "https://api.jina.ai/v1/embeddings"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {JINA_API_KEY}",
-    }
-    data = {
-        "model": model_name,
-        "normalized": True,
-        "embedding_type": "float",
-        "input": [text],
-    }
 
     response = requests.post(url, headers=headers, json=data)
     response.raise_for_status()
@@ -63,6 +47,13 @@ async def setup_collections():
 async def feed_data(json_file_path: str):
     await setup_collections()
     
+    # Load local models
+    local_models = {}
+    for model_key, model_info in MODELS.items():
+        if model_info["type"] == "local":
+            print(f"Loading {model_info['name']}...")
+            local_models[model_key] = SentenceTransformer(model_info["name"])
+    
     all_points = {model_key: [] for model_key in MODELS.keys()}
     total_processed = 0
 
@@ -83,7 +74,10 @@ async def feed_data(json_file_path: str):
                 for model_key, model_info in MODELS.items():
                     print(f"Processing with {model_info['name']}... (line {line_num})")
                     
-                    embedding = get_jina_embedding(post_content, model_info["name"])
+                    if model_info["type"] == "local":
+                        embedding = local_models[model_key].encode(post_content).tolist()
+                    else:
+                        raise ValueError(f"Unknown model type: {model_info['type']}")
                     
                     all_points[model_key].append(
                         PointStruct(id=point_id, vector=embedding, payload=payload)
