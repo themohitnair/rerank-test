@@ -23,10 +23,6 @@ MODELS = {
     },
 }
 
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
-    return response.json()["data"][0]["embedding"]
-
 async def setup_collections():
     for model_key, model_info in MODELS.items():
         collection_name = f"{model_key}_posts"
