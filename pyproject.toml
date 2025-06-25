@@ -10,6 +10,7 @@ dependencies = [
     "flagembedding>=1.3.5",
     "jinaai>=0.2.10",
     "matplotlib>=3.10.3",
+    "mxbai-rerank>=0.1.6",
     "orjson>=3.10.18",
     "pandas>=2.3.0",
     "qdrant-client>=1.14.3",

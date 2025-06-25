@@ -1,28 +1,33 @@
 import asyncio
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from qdrant_client import AsyncQdrantClient
 import matplotlib.pyplot as plt
 from collections import Counter
 import pandas as pd
 import numpy as np
+import requests
 import os
 import time
-from sentence_transformers import CrossEncoder
+from dotenv import load_dotenv
 from FlagEmbedding import FlagReranker
+from mxbai_rerank import MxbaiRerankV2
+
+load_dotenv()
 
 client = AsyncQdrantClient(host="localhost", port=6333)
+JINA_API_KEY = os.getenv("JINA_API_KEY")
 
 MODELS = {
     "e5_large": {
         "name": "intfloat/e5-large-v2",
         "dim": 1024,
-        "color": "green",
+        "color": "lightgreen",
         "type": "local",
     },
     "e5_base": {
         "name": "intfloat/e5-base-v2",
         "dim": 768,
-        "color": "violet",
+        "color": "lightyellow",
         "type": "local",
     },
 }
@@ -30,12 +35,12 @@ MODELS = {
 RERANKERS = {
     "mxbai_large2": {
         "name": "mixedbread-ai/mxbai-rerank-large-v2",
-        "type": "sentence_transformer",
+        "type": "mxbai_v2",
         "color": "orange",
     },
     "mxbai_base2": {
         "name": "mixedbread-ai/mxbai-rerank-base-v2",
-        "type": "sentence_transformer",
+        "type": "mxbai_v2",
         "color": "red",
     },
     "mxbai_large": {
@@ -43,13 +48,24 @@ RERANKERS = {
         "type": "sentence_transformer",
         "color": "blue",
     },
+    "jina_v2_multilingual": {
+        "name": "jina-reranker-v2-base-multilingual",
+        "type": "jina_api",
+        "color": "purple",
+    },
+    "bge_large": {
+        "name": "BAAI/bge-reranker-large",
+        "type": "flag_embedding",
+        "color": "darkgreen",
+    },
 }
-
 
 SPECIFIC_TOPICS = [
     "England Cricket Team",
     "England Football Team",
+    "Black Coffee",
     "Indian Cricket Team",
+    "Black History Month",
 ]
 
 
@@ -62,7 +78,41 @@ async def get_topic_counts(collection_name):
     for point in all_points:
         topic = point.payload.get("topic", "Unknown")
         topic_counts[topic] = topic_counts.get(topic, 0) + 1
+    print(f"Actual topic distribution in {collection_name}:")
+    for topic, count in topic_counts.items():
+        print(f"  {topic}: {count} documents")
     return topic_counts
+
+
+def get_jina_embedding(text, model_name):
+    url = "https://api.jina.ai/v1/embeddings"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {JINA_API_KEY}",
+    }
+    data = {
+        "model": model_name,
+        "normalized": True,
+        "embedding_type": "float",
+        "input": [text],
+    }
+    response = requests.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    return response.json()["data"][0]["embedding"]
+
+
+def jina_rerank(
+    query, documents, model="jina-reranker-v2-base-multilingual", top_n=None
+):
+    url = "https://api.jina.ai/v1/rerank"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {JINA_API_KEY}",
+    }
+    data = {"model": model, "query": query, "documents": documents, "top_n": top_n}
+    response = requests.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    return response.json()
 
 
 def flag_rerank(query, documents, model_name, top_n=None):
@@ -105,6 +155,30 @@ def sentence_transformer_rerank(query, documents, model_name, top_n=None):
         return {"results": results}
 
 
+def mxbai_v2_rerank(query, documents, model_name, top_n=None):
+    try:
+        reranker = MxbaiRerankV2(model_name)
+        results_raw = reranker.rank(query=query, documents=documents)
+        results = []
+        for i, result in enumerate(results_raw):
+            results.append(
+                {
+                    "index": result.get("index", i),
+                    "relevance_score": result.get("score", 0.0),
+                }
+            )
+        results.sort(key=lambda x: x["relevance_score"], reverse=True)
+        if top_n:
+            results = results[:top_n]
+        return {"results": results}
+    except Exception as e:
+        print(f"MxbAI v2 reranking failed: {e}")
+        results = [{"index": i, "relevance_score": 0.0} for i in range(len(documents))]
+        if top_n:
+            results = results[:top_n]
+        return {"results": results}
+
+
 def rerank_documents(query, documents, reranker_info, top_n=None):
     reranker_type = reranker_info["type"]
     model_name = reranker_info["name"]
@@ -114,6 +188,10 @@ def rerank_documents(query, documents, reranker_info, top_n=None):
             result = flag_rerank(query, documents, model_name, top_n)
         elif reranker_type == "sentence_transformer":
             result = sentence_transformer_rerank(query, documents, model_name, top_n)
+        elif reranker_type == "mxbai_v2":
+            result = mxbai_v2_rerank(query, documents, model_name, top_n)
+        elif reranker_type == "jina_api":
+            result = jina_rerank(query, documents, model_name, top_n)
         else:
             raise ValueError(f"Unknown reranker type: {reranker_type}")
     except Exception as e:
@@ -149,6 +227,8 @@ async def evaluate_rerankers(
 
         if model_info["type"] == "local":
             query_vector = local_models[model_key].encode(topic).tolist()
+        elif model_info["type"] == "jina_api":
+            query_vector = get_jina_embedding(topic, model_info["name"])
         else:
             raise ValueError(f"Unknown model type: {model_info['type']}")
 
@@ -161,6 +241,23 @@ async def evaluate_rerankers(
         )
 
         if not query_results.points:
+            print(f"  No results found for '{topic}'")
+            for reranker_key in RERANKERS.keys():
+                if reranker_key not in results_by_reranker:
+                    results_by_reranker[reranker_key] = {}
+                    timing_data[reranker_key] = {}
+                results_by_reranker[reranker_key][topic] = {
+                    "true_positives": 0,
+                    "false_positives": 0,
+                    "precision": 0,
+                    "recall": 0,
+                    "retrieved_topics": [],
+                    "total_retrieved": 0,
+                    "reranked_total": 0,
+                    "original_total": 0,
+                    "total_relevant_in_collection": total_relevant_docs,
+                }
+                timing_data[reranker_key][topic] = 0.0
             continue
 
         original_total = len(query_results.points)
@@ -188,11 +285,17 @@ async def evaluate_rerankers(
         }
 
         documents = [point.payload["post"] for point in query_results.points]
+        print(f"  Initial retrieval: {original_total} documents")
+        print(f"  Target rerank count: {target_rerank_count}")
+        print(f"  Original precision@{target_rerank_count}: {original_precision:.3f}")
+        print(f"  Original recall@{target_rerank_count}: {original_recall:.3f}")
 
         for reranker_key, reranker_info in RERANKERS.items():
             if reranker_key not in results_by_reranker:
                 results_by_reranker[reranker_key] = {}
                 timing_data[reranker_key] = {}
+
+            print(f"    Testing {reranker_key} ({reranker_info['name']})...")
 
             try:
                 rerank_results, rerank_time = rerank_documents(
@@ -207,7 +310,7 @@ async def evaluate_rerankers(
                 ]
                 reranked_points = [query_results.points[i] for i in reranked_indices]
             except Exception as e:
-                print(f"      Reranking failed: {e}")
+                print(f"      Reranking failed: {e}, using original top results")
                 reranked_points = query_results.points[:target_rerank_count]
                 timing_data[reranker_key][topic] = 0.0
 
@@ -232,239 +335,17 @@ async def evaluate_rerankers(
                 "total_relevant_in_collection": total_relevant_docs,
             }
 
+            print(f"      TP: {true_positives}, FP: {false_positives}")
+            print(f"      Precision@{total_retrieved}: {precision:.3f}")
+            print(f"      Recall@{total_retrieved}: {recall:.3f}")
+            print(f"      Rerank Time: {rerank_time:.3f}s")
+
     return results_by_reranker, original_results, timing_data
-
-
-def plot_reranker_performance_comparison(
-    all_results, original_results, timing_data, model_name
-):
-    """Plot comprehensive reranker performance analysis"""
-
-    # 1. Precision/Recall Comparison
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(20, 16))
-    fig.suptitle(f"Reranker Performance Analysis for {model_name}", fontsize=16)
-
-    topics = SPECIFIC_TOPICS
-    x = np.arange(len(topics))
-    width = 0.15
-
-    # Precision comparison
-    original_precisions = [original_results[topic]["precision"] for topic in topics]
-    ax1.bar(
-        x - width * 1.5,
-        original_precisions,
-        width,
-        label="Original",
-        color="gray",
-        alpha=0.7,
-    )
-
-    for i, (reranker_key, reranker_info) in enumerate(RERANKERS.items()):
-        if reranker_key in all_results:
-            precisions = [
-                all_results[reranker_key][topic]["precision"] for topic in topics
-            ]
-            ax1.bar(
-                x + width * (i - 0.5),
-                precisions,
-                width,
-                label=reranker_key.upper(),
-                color=reranker_info["color"],
-            )
-
-    ax1.set_title("Precision Comparison: Original vs Rerankers")
-    ax1.set_xlabel("Topics")
-    ax1.set_ylabel("Precision")
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(topics, rotation=45, ha="right")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-
-    # Recall comparison
-    original_recalls = [original_results[topic]["recall"] for topic in topics]
-    ax2.bar(
-        x - width * 1.5,
-        original_recalls,
-        width,
-        label="Original",
-        color="gray",
-        alpha=0.7,
-    )
-
-    for i, (reranker_key, reranker_info) in enumerate(RERANKERS.items()):
-        if reranker_key in all_results:
-            recalls = [all_results[reranker_key][topic]["recall"] for topic in topics]
-            ax2.bar(
-                x + width * (i - 0.5),
-                recalls,
-                width,
-                label=reranker_key.upper(),
-                color=reranker_info["color"],
-            )
-
-    ax2.set_title("Recall Comparison: Original vs Rerankers")
-    ax2.set_xlabel("Topics")
-    ax2.set_ylabel("Recall")
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(topics, rotation=45, ha="right")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-
-    # Average precision improvement
-    avg_precisions = []
-    reranker_names = ["Original"]
-    avg_precisions.append(np.mean(original_precisions))
-
-    for reranker_key, reranker_info in RERANKERS.items():
-        if reranker_key in all_results:
-            avg_prec = np.mean(
-                [all_results[reranker_key][topic]["precision"] for topic in topics]
-            )
-            avg_precisions.append(avg_prec)
-            reranker_names.append(reranker_key.upper())
-
-    bars3 = ax3.bar(
-        reranker_names,
-        avg_precisions,
-        color=["gray"]
-        + [RERANKERS[k]["color"] for k in RERANKERS.keys() if k in all_results],
-    )
-    ax3.set_title("Average Precision by Method")
-    ax3.set_ylabel("Average Precision")
-    ax3.tick_params(axis="x", rotation=45)
-
-    # Add value labels on bars
-    for bar, val in zip(bars3, avg_precisions):
-        ax3.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.01,
-            f"{val:.3f}",
-            ha="center",
-            va="bottom",
-            fontsize=10,
-        )
-
-    # Timing analysis
-    avg_times = []
-    timing_names = []
-    timing_colors = []
-
-    for reranker_key, reranker_info in RERANKERS.items():
-        if reranker_key in timing_data:
-            avg_time = np.mean([timing_data[reranker_key][topic] for topic in topics])
-            avg_times.append(avg_time)
-            timing_names.append(reranker_key.upper())
-            timing_colors.append(reranker_info["color"])
-
-    bars4 = ax4.bar(timing_names, avg_times, color=timing_colors)
-    ax4.set_title("Average Reranking Time")
-    ax4.set_ylabel("Time (seconds)")
-    ax4.tick_params(axis="x", rotation=45)
-
-    # Add value labels on bars
-    for bar, time_val in zip(bars4, avg_times):
-        ax4.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.001,
-            f"{time_val:.3f}s",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
-
-    plt.tight_layout()
-    safe_model_name = model_name.replace("/", "_").replace(" ", "_")
-    plt.savefig(
-        f"reranker_performance_{safe_model_name}.png", dpi=300, bbox_inches="tight"
-    )
-    plt.close()
-    print(
-        f"✅ Saved reranker performance plot: reranker_performance_{safe_model_name}.png"
-    )
-
-
-def plot_topic_distribution_comparison(all_results, original_results, model_name):
-    """Plot topic distribution for original vs reranked results"""
-
-    os.makedirs("reranker_topic_plots", exist_ok=True)
-
-    for topic in SPECIFIC_TOPICS:
-        fig, axes = plt.subplots(
-            1, len(RERANKERS) + 1, figsize=(6 * (len(RERANKERS) + 1), 6)
-        )
-        fig.suptitle(
-            f'Topic Distribution: "{topic}" - Original vs Rerankers ({model_name})',
-            fontsize=16,
-        )
-
-        # Plot original results
-        counter = Counter(original_results[topic]["retrieved_topics"])
-        labels = list(counter.keys())
-        counts = list(counter.values())
-
-        ax = axes[0]
-        bars = ax.bar(range(len(labels)), counts, color="gray", alpha=0.7)
-
-        # Highlight target topic
-        for i, label in enumerate(labels):
-            if label == topic:
-                bars[i].set_color("gold")
-                bars[i].set_edgecolor("black")
-                bars[i].set_linewidth(2)
-
-        ax.set_title(f"ORIGINAL\nP:{original_results[topic]['precision']:.3f}")
-        ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-        ax.set_ylabel("Count")
-
-        # Plot reranked results
-        for idx, (reranker_key, reranker_info) in enumerate(RERANKERS.items(), 1):
-            if reranker_key in all_results and topic in all_results[reranker_key]:
-                counter = Counter(all_results[reranker_key][topic]["retrieved_topics"])
-                labels = list(counter.keys())
-                counts = list(counter.values())
-
-                ax = axes[idx]
-                bars = ax.bar(
-                    range(len(labels)), counts, color=reranker_info["color"], alpha=0.7
-                )
-
-                # Highlight target topic
-                for i, label in enumerate(labels):
-                    if label == topic:
-                        bars[i].set_color("gold")
-                        bars[i].set_edgecolor("black")
-                        bars[i].set_linewidth(2)
-
-                precision_diff = (
-                    all_results[reranker_key][topic]["precision"]
-                    - original_results[topic]["precision"]
-                )
-                ax.set_title(
-                    f"{reranker_key.upper()}\nP:{all_results[reranker_key][topic]['precision']:.3f} (Δ{precision_diff:+.3f})"
-                )
-                ax.set_xticks(range(len(labels)))
-                ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-                ax.set_ylabel("Count")
-
-        plt.tight_layout()
-        safe_topic_name = topic.replace(" ", "_").replace("/", "_")
-        safe_model_name = model_name.replace("/", "_").replace(" ", "_")
-        plt.savefig(
-            f"reranker_topic_plots/{safe_topic_name}_{safe_model_name}_comparison.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-        plt.close()
-        print(
-            f"✅ Saved topic distribution plot: {safe_topic_name}_{safe_model_name}_comparison.png"
-        )
 
 
 def create_comprehensive_comparison_table(all_results, original_results, timing_data):
     summary_data = []
 
-    # Original results
     orig_avg_precision = np.mean(
         [original_results[topic]["precision"] for topic in SPECIFIC_TOPICS]
     )
@@ -506,7 +387,6 @@ def create_comprehensive_comparison_table(all_results, original_results, timing_
         }
     )
 
-    # Reranker results
     for reranker_key, reranker_info in RERANKERS.items():
         if reranker_key not in all_results:
             continue
@@ -568,6 +448,217 @@ def create_comprehensive_comparison_table(all_results, original_results, timing_
     return pd.DataFrame(summary_data)
 
 
+def plot_reranker_performance_comparison(
+    all_results, original_results, timing_data, model_name
+):
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(20, 16))
+    fig.suptitle(f"Reranker Performance Analysis for {model_name}", fontsize=16)
+
+    topics = SPECIFIC_TOPICS
+    x = np.arange(len(topics))
+    width = 0.15
+
+    original_precisions = [original_results[topic]["precision"] for topic in topics]
+    ax1.bar(
+        x - width * 1.5,
+        original_precisions,
+        width,
+        label="Original",
+        color="gray",
+        alpha=0.7,
+    )
+
+    for i, (reranker_key, reranker_info) in enumerate(RERANKERS.items()):
+        if reranker_key in all_results:
+            precisions = [
+                all_results[reranker_key][topic]["precision"] for topic in topics
+            ]
+            ax1.bar(
+                x + width * (i - 0.5),
+                precisions,
+                width,
+                label=reranker_key.upper(),
+                color=reranker_info["color"],
+            )
+
+    ax1.set_title("Precision Comparison: Original vs Rerankers")
+    ax1.set_xlabel("Topics")
+    ax1.set_ylabel("Precision")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(topics, rotation=45, ha="right")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    original_recalls = [original_results[topic]["recall"] for topic in topics]
+    ax2.bar(
+        x - width * 1.5,
+        original_recalls,
+        width,
+        label="Original",
+        color="gray",
+        alpha=0.7,
+    )
+
+    for i, (reranker_key, reranker_info) in enumerate(RERANKERS.items()):
+        if reranker_key in all_results:
+            recalls = [all_results[reranker_key][topic]["recall"] for topic in topics]
+            ax2.bar(
+                x + width * (i - 0.5),
+                recalls,
+                width,
+                label=reranker_key.upper(),
+                color=reranker_info["color"],
+            )
+
+    ax2.set_title("Recall Comparison: Original vs Rerankers")
+    ax2.set_xlabel("Topics")
+    ax2.set_ylabel("Recall")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(topics, rotation=45, ha="right")
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    avg_precisions = []
+    reranker_names = ["Original"]
+    avg_precisions.append(np.mean(original_precisions))
+
+    for reranker_key, reranker_info in RERANKERS.items():
+        if reranker_key in all_results:
+            avg_prec = np.mean(
+                [all_results[reranker_key][topic]["precision"] for topic in topics]
+            )
+            avg_precisions.append(avg_prec)
+            reranker_names.append(reranker_key.upper())
+
+    bars3 = ax3.bar(
+        reranker_names,
+        avg_precisions,
+        color=["gray"]
+        + [RERANKERS[k]["color"] for k in RERANKERS.keys() if k in all_results],
+    )
+    ax3.set_title("Average Precision by Method")
+    ax3.set_ylabel("Average Precision")
+    ax3.tick_params(axis="x", rotation=45)
+
+    for bar, val in zip(bars3, avg_precisions):
+        ax3.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.01,
+            f"{val:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+        )
+
+    avg_times = []
+    timing_names = []
+    timing_colors = []
+
+    for reranker_key, reranker_info in RERANKERS.items():
+        if reranker_key in timing_data:
+            avg_time = np.mean([timing_data[reranker_key][topic] for topic in topics])
+            avg_times.append(avg_time)
+            timing_names.append(reranker_key.upper())
+            timing_colors.append(reranker_info["color"])
+
+    bars4 = ax4.bar(timing_names, avg_times, color=timing_colors)
+    ax4.set_title("Average Reranking Time")
+    ax4.set_ylabel("Time (seconds)")
+    ax4.tick_params(axis="x", rotation=45)
+
+    for bar, time_val in zip(bars4, avg_times):
+        ax4.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.001,
+            f"{time_val:.3f}s",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+    plt.tight_layout()
+    safe_model_name = model_name.replace("/", "_").replace(" ", "_")
+    plt.savefig(
+        f"reranker_performance_{safe_model_name}.png", dpi=300, bbox_inches="tight"
+    )
+    plt.close()
+    print(
+        f"✅ Saved reranker performance plot: reranker_performance_{safe_model_name}.png"
+    )
+
+
+def plot_topic_distribution_comparison(all_results, original_results, model_name):
+    os.makedirs("reranker_topic_plots", exist_ok=True)
+
+    for topic in SPECIFIC_TOPICS:
+        fig, axes = plt.subplots(
+            1, len(RERANKERS) + 1, figsize=(6 * (len(RERANKERS) + 1), 6)
+        )
+        fig.suptitle(
+            f'Topic Distribution: "{topic}" - Original vs Rerankers ({model_name})',
+            fontsize=16,
+        )
+
+        counter = Counter(original_results[topic]["retrieved_topics"])
+        labels = list(counter.keys())
+        counts = list(counter.values())
+
+        ax = axes[0]
+        bars = ax.bar(range(len(labels)), counts, color="gray", alpha=0.7)
+
+        for i, label in enumerate(labels):
+            if label == topic:
+                bars[i].set_color("gold")
+                bars[i].set_edgecolor("black")
+                bars[i].set_linewidth(2)
+
+        ax.set_title(f"ORIGINAL\nP:{original_results[topic]['precision']:.3f}")
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("Count")
+
+        for idx, (reranker_key, reranker_info) in enumerate(RERANKERS.items(), 1):
+            if reranker_key in all_results and topic in all_results[reranker_key]:
+                counter = Counter(all_results[reranker_key][topic]["retrieved_topics"])
+                labels = list(counter.keys())
+                counts = list(counter.values())
+
+                ax = axes[idx]
+                bars = ax.bar(
+                    range(len(labels)), counts, color=reranker_info["color"], alpha=0.7
+                )
+
+                for i, label in enumerate(labels):
+                    if label == topic:
+                        bars[i].set_color("gold")
+                        bars[i].set_edgecolor("black")
+                        bars[i].set_linewidth(2)
+
+                precision_diff = (
+                    all_results[reranker_key][topic]["precision"]
+                    - original_results[topic]["precision"]
+                )
+                ax.set_title(
+                    f"{reranker_key.upper()}\nP:{all_results[reranker_key][topic]['precision']:.3f} (Δ{precision_diff:+.3f})"
+                )
+                ax.set_xticks(range(len(labels)))
+                ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+                ax.set_ylabel("Count")
+
+        plt.tight_layout()
+        safe_topic_name = topic.replace(" ", "_").replace("/", "_")
+        safe_model_name = model_name.replace(" ", "_").replace("/", "_")
+        plt.savefig(
+            f"reranker_topic_plots/{safe_topic_name}_{safe_model_name}_comparison.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close()
+        print(
+            f"✅ Saved topic distribution plot: {safe_topic_name}_{safe_model_name}_comparison.png"
+        )
+
+
 async def main(k=100, score_threshold=0.3, rerank_top_percent=0.8):
     print("🔍 Evaluating Multiple Rerankers with Local E5 Embeddings")
     print(
@@ -577,14 +668,12 @@ async def main(k=100, score_threshold=0.3, rerank_top_percent=0.8):
     print(f"Rerankers to test: {list(RERANKERS.keys())}")
     print("=" * 80)
 
-    # Load local embedding models
     local_models = {}
     for model_key, model_info in MODELS.items():
         if model_info["type"] == "local":
             print(f"Loading {model_info['name']}...")
             local_models[model_key] = SentenceTransformer(model_info["name"])
 
-    # Store results for all models
     all_model_results = {}
 
     for model_key, model_info in MODELS.items():
@@ -593,7 +682,6 @@ async def main(k=100, score_threshold=0.3, rerank_top_percent=0.8):
             model_key, model_info, local_models, k, score_threshold, rerank_top_percent
         )
 
-        # Store results for this model
         all_model_results[model_key] = {
             "all_results": all_results,
             "original_results": original_results,
@@ -617,7 +705,6 @@ async def main(k=100, score_threshold=0.3, rerank_top_percent=0.8):
         )
         print(summary_df.to_string(index=False, float_format="%.3f"))
 
-        # Save results for this model
         model_filename = f"reranker_results_{model_key}.csv"
         summary_df.to_csv(model_filename, index=False)
         print(f"💾 Results saved to: {os.path.abspath(model_filename)}")
