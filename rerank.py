@@ -6,6 +6,7 @@ from collections import Counter
 import pandas as pd
 import numpy as np
 import requests
+import cohere
 import os
 import time
 from dotenv import load_dotenv
