@@ -15,6 +15,8 @@ from FlagEmbedding import FlagReranker
 load_dotenv()
 
 client = AsyncQdrantClient(host="localhost", port=6333)
+COHERE_API_KEY = os.getenv("COHERE_API_KEY")
+co = cohere.Client(COHERE_API_KEY) if COHERE_API_KEY else None
 
 MODELS = {
     "e5_large": {
@@ -37,15 +39,10 @@ RERANKERS = {
         "type": "sentence_transformer",
         "color": "orange",
     },
-    "bge_large": {
-        "name": "BAAI/bge-reranker-large",
-        "type": "flag_embedding",
-        "color": "darkgreen",
-    },
-    "bge_v2_m3": {
-        "name": "BAAI/bge-reranker-v2-m3",
-        "type": "sentence_transformer",
-        "color": "blue",
+    "cohere_rerank": {
+        "name": "rerank-english-v3.0",
+        "type": "cohere_api",
+        "color": "purple",
     },
 }
 
@@ -66,6 +63,37 @@ async def get_topic_counts(collection_name):
         topic = point.payload.get("topic", "Unknown")
         topic_counts[topic] = topic_counts.get(topic, 0) + 1
     return topic_counts
+
+def cohere_rerank(query, documents, model_name, top_n=None):
+    try:
+        time.sleep(0.1)
+        if not co:
+            raise ValueError("Cohere client not initialized. Check your API key.")
+        
+        results = co.rerank(
+            query=query,
+            documents=documents,
+            top_n=top_n,
+            model=model_name
+        )
+        
+        rerank_results = []
+        for hit in results.results:
+            rerank_results.append({
+                "index": hit.index,
+                "relevance_score": float(hit.relevance_score)
+            })
+        
+        return {"results": rerank_results}
+        
+    except Exception as e:
+        print(f"Cohere reranking failed: {e}")
+        # Return fallback results
+        results = [{"index": i, "relevance_score": 0.0} for i in range(len(documents))]
+        if top_n:
+            results = results[:top_n]
+        return {"results": results}
+
 
 def flag_rerank(query, documents, model_name, top_n=None):
     try:
@@ -114,6 +142,8 @@ def rerank_documents(query, documents, reranker_info, top_n=None):
             result = flag_rerank(query, documents, model_name, top_n)
         elif reranker_type == "sentence_transformer":
             result = sentence_transformer_rerank(query, documents, model_name, top_n)
+        elif reranker_type == "cohere_api":
+            result = cohere_rerank(query, documents, model_name, top_n)
         else:
             raise ValueError(f"Unknown reranker type: {reranker_type}")
     except Exception as e:
