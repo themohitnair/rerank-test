@@ -5,10 +5,6 @@ import matplotlib.pyplot as plt
 from collections import Counter
 import pandas as pd
 import numpy as np
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
 
 client = AsyncQdrantClient(host="localhost", port=6333)
 
@@ -35,23 +31,6 @@ SPECIFIC_TOPICS = [
     "Black History Month",
 ]
 
-def get_jina_embedding(text, model_name):
-    url = "https://api.jina.ai/v1/embeddings"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {JINA_API_KEY}",
-    }
-    data = {
-        "model": model_name,
-        "normalized": True,
-        "embedding_type": "float",
-        "input": [text],
-    }
-
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
-    return response.json()["data"][0]["embedding"]
-
 async def evaluate_model(model_key, model_info, local_models=None, k=100, score_threshold=0.3):
     results = {}
     collection_name = f"{model_key}_posts"
@@ -61,10 +40,6 @@ async def evaluate_model(model_key, model_info, local_models=None, k=100, score_
 
         if model_info["type"] == "local":
             query_vector = local_models[model_key].encode(topic).tolist()
-        elif model_info["type"] == "openai_api":
-            query_vector = get_openai_embedding(topic, model_info["name"])
-        elif model_info["type"] == "jina_api":
-            query_vector = get_jina_embedding(topic, model_info["name"])
 
         query_results = await client.query_points(
             collection_name=collection_name,
