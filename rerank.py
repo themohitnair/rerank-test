@@ -110,7 +110,7 @@ def rerank_documents(query, documents, reranker_info, top_n=None):
     model_name = reranker_info["name"]
     start_time = time.time()
     try:
-        elif reranker_type == "flag_embedding":
+        if reranker_type == "flag_embedding":
             result = flag_rerank(query, documents, model_name, top_n)
         elif reranker_type == "sentence_transformer":
             result = sentence_transformer_rerank(query, documents, model_name, top_n)
